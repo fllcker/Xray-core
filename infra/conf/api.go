@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/xtls/xray-core/app/commander"
+	fllckerservice "github.com/xtls/xray-core/app/fllcker/command" // [fllcker:FLK-005]
 	loggerservice "github.com/xtls/xray-core/app/log/command"
 	observatoryservice "github.com/xtls/xray-core/app/observatory/command"
 	handlerservice "github.com/xtls/xray-core/app/proxyman/command"
@@ -39,6 +40,8 @@ func (c *APIConfig) Build() (*commander.Config, error) {
 			services = append(services, serial.ToTypedMessage(&observatoryservice.Config{}))
 		case "routingservice":
 			services = append(services, serial.ToTypedMessage(&routerservice.Config{}))
+		case "fllckerservice": // [fllcker:FLK-005]
+			services = append(services, serial.ToTypedMessage(&fllckerservice.Config{}))
 		}
 	}
 

@@ -12,6 +12,7 @@ import (
 	_ "github.com/xtls/xray-core/app/commander"
 	_ "github.com/xtls/xray-core/app/log/command"
 	_ "github.com/xtls/xray-core/app/proxyman/command"
+	_ "github.com/xtls/xray-core/app/fllcker/command" // [fllcker:FLK-006]
 	_ "github.com/xtls/xray-core/app/stats/command"
 
 	// Developer preview services
