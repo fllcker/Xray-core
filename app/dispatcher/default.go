@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xtls/xray-core/app/fllcker" // [fllcker:FLK-001]
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -182,6 +183,11 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, d.stats, user.Email, sessionInbound.Source.Address.String())
 		}
+
+		// Dispatch path: VMess, Trojan and Shadowsocks arrive here. Outside the
+		// UserOnline check on purpose, session control must not depend on
+		// whether stats are enabled in policy.
+		fllcker.Track(ctx, user.Email) // [fllcker:FLK-001]
 	}
 
 	return inboundLink, outboundLink
@@ -216,6 +222,11 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, statsManager, user.Email, sessionInbound.Source.Address.String())
 		}
+
+		// DispatchLink path: VLESS and Hysteria2 arrive here, so this is the
+		// hook that carries production traffic. Same reasoning as FLK-001 for
+		// sitting outside the UserOnline check.
+		fllcker.Track(ctx, user.Email) // [fllcker:FLK-002]
 	}
 
 	return link
