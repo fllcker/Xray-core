@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package xray.app.fllcker.command;
+option csharp_namespace = "Xray.App.Fllcker.Command";
+option go_package = "github.com/xtls/xray-core/app/fllcker/command";
+option java_package = "com.xray.app.fllcker.command";
+option java_multiple_files = true;
+
+// Every operation is scoped to a user together with an address, never to an
+// address on its own. Hundreds of users can share one carrier-grade NAT
+// address, so email is required on every call that changes state.
+//
+// All timestamps are unix seconds.
+
+message KickRequest {
+  // Identity of the user, as the core carries it in session metadata. Required.
+  string email = 1;
+  // Addresses to act on. Empty means every address the user currently holds.
+  //
+  // Passing the whole list in one call matters: kicking address by address
+  // leaves a window in which the client dropped by an earlier call is already
+  // back on an address the caller has not named yet.
+  repeated string ips = 2;
+  // How long to refuse this user at these addresses. 0 kicks without blocking,
+  // which on its own achieves little: a client reconnects in about the time it
+  // takes to notice the drop.
+  uint32 ban_seconds = 3;
+}
+
+message KickResponse {
+  // Distinct connections closed. For Hysteria2 this counts QUIC streams rather
+  // than clients: a kick there ends the stream while the client stays
+  // authenticated at the transport layer, and it is the block that turns away
+  // whatever it opens next.
+  int32 closed = 1;
+  // When the block lifts, or 0 if none was placed. Rounded up, so waiting until
+  // this moment never returns while the block is still live.
+  int64 banned_until = 2;
+}
+
+message SessionIP {
+  string ip = 1;
+  // Live connections from this address.
+  int32 conns = 2;
+  // When the address first appeared. Answers "who arrived when".
+  int64 since = 3;
+  // When this address last opened a stream. Answers "is it still doing
+  // anything": an address left behind by a network switch stops opening
+  // streams, while a device in use opens them continuously.
+  int64 last_seen = 4;
+  // 0 when not blocked.
+  int64 banned_until = 5;
+}
+
+message UserSessions {
+  string email = 1;
+  repeated SessionIP ips = 2;
+}
+
+message ListSessionsRequest {
+  // Empty means every user.
+  string email = 1;
+}
+
+message ListSessionsResponse {
+  repeated UserSessions users = 1;
+}
+
+message BanEntry {
+  string email = 1;
+  string ip = 2;
+  int64 until = 3;
+}
+
+message ListBansRequest {
+  // Empty means every user.
+  string email = 1;
+}
+
+message ListBansResponse {
+  // Expired entries are never reported, even before they are collected.
+  repeated BanEntry bans = 1;
+}
+
+message UnbanRequest {
+  // Required.
+  string email = 1;
+  // Empty lifts every block on this user.
+  repeated string ips = 2;
+}
+
+message UnbanResponse {
+  // False when there was nothing to lift.
+  bool lifted = 1;
+}
+
+service FllckerService {
+  rpc Kick(KickRequest) returns (KickResponse) {}
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {}
+  rpc ListBans(ListBansRequest) returns (ListBansResponse) {}
+  rpc Unban(UnbanRequest) returns (UnbanResponse) {}
+}
+
+message Config {}
