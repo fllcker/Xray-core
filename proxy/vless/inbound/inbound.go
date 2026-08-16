@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/xtls/xray-core/app/dispatcher"
+	"github.com/xtls/xray-core/app/fllcker" // [fllcker:FLK-003]
 	"github.com/xtls/xray-core/app/reverse"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -536,6 +537,14 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	inbound.Name = "vless"
 	inbound.User = request.User
 	inbound.VlessRoute = net.PortFromBytes(userSentID[6:8])
+
+	// Must stay after the request has been parsed: the fallback branch above
+	// handles parse errors, and checking earlier would send a banned client to
+	// the fallback site instead of dropping it. Covers TCP and XHTTP alike,
+	// both arrive here. [fllcker:FLK-003]
+	if fllcker.IsBanned(request.User.Email, inbound.Source.Address.String()) {
+		return errors.New("fllcker: temporarily banned ip").AtInfo()
+	}
 
 	account := request.User.Account.(*vless.MemoryAccount)
 

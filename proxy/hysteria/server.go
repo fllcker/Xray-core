@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xtls/xray-core/app/fllcker" // [fllcker:FLK-004]
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -97,6 +98,16 @@ func (s *Server) Process(ctx context.Context, network net.Network, conn stat.Con
 			inbound.User = user
 			inbound.VlessRoute = user.Account.(*account.MemoryAccount).VR
 		}
+	}
+
+	// Hysteria authenticates at the QUIC layer, so the VLESS check cannot reach
+	// here and this protocol needs its own. Two things matter: the empty Email
+	// guard, because inbound.User stays an empty MemoryUser when the client is
+	// not recognised, and the position before the UDP/TCP split below, because
+	// a check in one branch leaves the other open. [fllcker:FLK-004]
+	if email := inbound.User.Email; email != "" &&
+		fllcker.IsBanned(email, inbound.Source.Address.String()) {
+		return errors.New("fllcker: temporarily banned ip").AtInfo()
 	}
 
 	if _, ok := iConn.(*hysteria.InterConn); ok {
