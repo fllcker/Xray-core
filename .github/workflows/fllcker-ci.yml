@@ -1,0 +1,84 @@
+name: fllcker CI
+
+# The gate for this fork's own changes.
+#
+# Deliberately narrow. Upstream is not green on its own: `go test ./...` needs
+# network access and geodata files that are not in the repository, and
+# `go vet ./...` reports pre-existing unsafe.Pointer findings in proxy/vless. A
+# gate that is red no matter what is a gate nobody reads, so this one checks
+# what we are responsible for. See PLAN.md §13.4.
+
+# Automatic triggers are off for now: the fork is driven by hand and the gate
+# runs locally. Note that `workflow_dispatch` alone still keeps this a valid
+# workflow file, so it shows up in the Actions tab with a Run button; deleting
+# the whole `on:` block instead would make GitHub flag the file as broken.
+#
+# To put the gate back: uncomment the two triggers below.
+on:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # First, and on purpose. A rebase can drop one of our lines from an
+      # upstream file without breaking the build: everything compiles, tests
+      # pass, and the feature is quietly gone. Nothing else catches that.
+      - name: Patches still in place
+        run: bash scripts/check-patches.sh
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./app/fllcker/... ./app/dispatcher/... ./proxy/hysteria/...
+
+      - name: Test
+        run: go test -count=1 ./app/fllcker/... ./app/dispatcher/...
+
+      # The registry is concurrent and the race detector needs cgo, which rules
+      # it out on the Windows dev machine. This is the only place it runs.
+      - name: Test with the race detector
+        run: go test -race -count=3 ./app/fllcker/...
+
+      # Narrowed to one test: the rest of infra/conf needs geodata files.
+      - name: Config wiring
+        run: go test -count=1 ./infra/conf/ -run TestAPIConfig
+
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l app/fllcker scripts 2>/dev/null || true)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  # Not a gate. Upstream's own suite fails for reasons that predate this fork,
+  # so this job exists to show when that picture changes, not to block a merge.
+  upstream-suite:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Full test suite (informational)
+        run: go test -count=1 ./... || true

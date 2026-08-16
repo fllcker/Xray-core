@@ -1,0 +1,212 @@
+name: fllcker sync upstream
+
+# Watches XTLS/Xray-core for a new release, replays this fork's patches onto it
+# and opens a pull request.
+#
+# It never merges on its own. A clean rebase and a green build do not prove the
+# patches still do anything: upstream can stop filling session.Inbound.Conn for
+# a transport, move where WrapLink is called, or rewrite the Hysteria2
+# handshake, and all of that compiles and passes tests while session control
+# quietly stops working. Reviewing ~35 marked lines once per release is cheap;
+# discovering that kicks have been silently dead for three weeks is not.
+# See PLAN.md §13.3.
+#
+# Note: a pull request opened with the default GITHUB_TOKEN does not trigger
+# other workflows, so fllcker-ci will not appear as a check on it. That is why
+# the whole gate runs inline here, in "Verify the patches survived", before the
+# pull request is opened at all. Swap in a personal access token if the check
+# mark on the pull request matters more than the extra secret.
+
+# The nightly schedule is off for now; syncs are done by hand. Uncomment the
+# two lines below to bring it back. Remember that GitHub disables scheduled
+# workflows in a repository after 60 days without activity, so re-enabling one
+# that has sat commented out for a while may also need a nudge in the Actions
+# tab.
+on:
+  # schedule:
+  #   - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Look for a newer upstream release
+        id: check
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/XTLS/Xray-core.git
+          git fetch --tags --quiet upstream
+
+          # Upstream tags only. This fork's own release tags (v<upstream>-fllcker)
+          # also match 'v*' and sort ABOVE the tag they were built from, so
+          # leaving them in makes LATEST our own tag; --is-ancestor below then
+          # succeeds and the sync reports "already up to date" forever without
+          # ever failing. The `|| true` is for pipefail: grep exits non-zero
+          # both on no match and on SIGPIPE from head.
+          LATEST=$( { git tag -l 'v*' --sort=-v:refname | grep -v -- '-fllcker' || true; } | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "no upstream release tags found" >&2
+            exit 1
+          fi
+
+          # The commit this fork branched from, derived rather than recorded:
+          # a file holding the base would be one more thing to keep in sync,
+          # and a stale one would send the rebase to the wrong place.
+          BASE=$(git merge-base HEAD upstream/main)
+
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "$LATEST" HEAD; then
+            echo "already on $LATEST or newer"
+            echo "todo=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new release: $LATEST"
+            echo "todo=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Replay patches onto the new release
+        id: rebase
+        if: steps.check.outputs.todo == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          LATEST="${{ steps.check.outputs.latest }}"
+          BASE="${{ steps.check.outputs.base }}"
+
+          git checkout -b "sync/$LATEST"
+
+          if ! git rebase --onto "$LATEST" "$BASE" "sync/$LATEST"; then
+            # README.md belongs to this fork outright, and upstream edits theirs
+            # often. Resolving that one automatically keeps a documentation
+            # change from derailing a sync that is otherwise clean. Anything
+            # else is a real conflict and stops here for a human.
+            #
+            # Mind the inversion: during a rebase --ours is the new upstream
+            # base and --theirs is our commit being replayed, which is the
+            # opposite of what the words suggest.
+            guard=0
+            while [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; do
+              guard=$((guard + 1))
+              if [ "$guard" -gt 20 ]; then
+                git rebase --abort || true
+                echo "rebase did not converge" >&2
+                exit 1
+              fi
+
+              conflicted=$(git diff --name-only --diff-filter=U)
+              if [ -n "$conflicted" ] && [ "$conflicted" != "README.md" ]; then
+                echo "conflicts outside the files this fork owns:" >&2
+                echo "$conflicted" >&2
+                git rebase --abort || true
+                exit 1
+              fi
+
+              if [ -n "$conflicted" ]; then
+                git checkout --theirs -- README.md
+                git add README.md
+              fi
+              GIT_EDITOR=true git rebase --continue || true
+            done
+          fi
+
+          echo "$LATEST" > UPSTREAM_TAG
+          git add UPSTREAM_TAG
+          git diff --cached --quiet || git commit -m "chore: record upstream $LATEST"
+
+      - name: Verify the patches survived
+        if: steps.check.outputs.todo == 'true'
+        run: |
+          set -euo pipefail
+          bash scripts/check-patches.sh
+          go build ./...
+          go vet ./app/fllcker/... ./app/dispatcher/... ./proxy/hysteria/...
+          go test -count=1 ./app/fllcker/... ./app/dispatcher/...
+          go test -race -count=3 ./app/fllcker/...
+          go test -count=1 ./infra/conf/ -run TestAPIConfig
+
+      - name: Open a pull request
+        if: steps.check.outputs.todo == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          LATEST="${{ steps.check.outputs.latest }}"
+          git push --force-with-lease origin "sync/$LATEST"
+
+          # --repo is not optional here. In a fork, gh resolves the base
+          # repository to the parent, so without it this opens the pull request
+          # against XTLS/Xray-core instead of ours.
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --title "Sync with upstream $LATEST" \
+            --head "sync/$LATEST" \
+            --base main \
+            --body "$(cat <<EOF
+          Patches replayed onto upstream \`$LATEST\` without conflicts, and the
+          gate is green.
+
+          **Green does not mean safe to merge.** Before approving, read the diff
+          of the five upstream files against the patch cards in
+          [PATCHES.md](PATCHES.md) and confirm each anchor still means what the
+          card says:
+
+          - \`app/dispatcher/default.go\` — FLK-001, FLK-002
+          - \`proxy/vless/inbound/inbound.go\` — FLK-003
+          - \`proxy/hysteria/server.go\` — FLK-004
+          - \`infra/conf/api.go\` — FLK-005
+          - \`main/distro/all/all.go\` — FLK-006
+
+          Watch in particular for: \`session.Inbound.Conn\` no longer being
+          filled, \`WrapLink\` moving or being called at a different point, and
+          changes to Hysteria2 authentication. Each of those compiles and tests
+          clean while breaking session control.
+          EOF
+          )"
+
+      - name: Report a failed sync
+        if: failure() && steps.check.outputs.todo == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST="${{ steps.check.outputs.latest }}"
+          # Same fork caveat as the pull request step: without --repo these two
+          # would search and file in the parent repository.
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "Sync with upstream $LATEST in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            echo "issue #$EXISTING already open"
+            exit 0
+          fi
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "Sync with upstream $LATEST failed" \
+            --body "$(cat <<EOF
+          The automated rebase onto \`$LATEST\` did not go through: either the
+          patches conflicted or the checks failed afterwards.
+
+          [Run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          Resolve by hand following the rules in [PATCHES.md](PATCHES.md). The
+          short version: upstream's version of the surrounding code wins, our
+          marked lines get re-inserted by anchor, and if an anchor is gone in a
+          way that makes its invariant impossible to keep, stop and say so here
+          rather than improvising a nearby spot.
+          EOF
+          )"
